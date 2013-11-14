@@ -1,0 +1,155 @@
+From 993a661206a86a018395c1a8be682a31c8df231b Mon Sep 17 00:00:00 2001
+From: Andrew Klofas <Andrew.Klofas@novariant.com>
+Date: Thu, 14 Nov 2013 11:52:45 -0800
+Subject: [PATCH] Copyfd syscall
+
+---
+ Makefile                         |  2 +-
+ arch/x86/syscalls/syscall_64.tbl |  1 +
+ embedded/Makefile                |  5 ++++
+ embedded/copyfd.c                | 55 ++++++++++++++++++++++++++++++++++++++++
+ include/linux/syscalls.h         |  1 +
+ test_copyfd.c                    | 22 ++++++++++++++++
+ 6 files changed, 85 insertions(+), 1 deletion(-)
+ create mode 100644 embedded/Makefile
+ create mode 100644 embedded/copyfd.c
+ create mode 100644 test_copyfd.c
+
+diff --git a/Makefile b/Makefile
+index 67077ad..c9441b5 100644
+--- a/Makefile
++++ b/Makefile
+@@ -733,7 +733,7 @@ export mod_sign_cmd
+ 
+ 
+ ifeq ($(KBUILD_EXTMOD),)
+-core-y		+= kernel/ mm/ fs/ ipc/ security/ crypto/ block/
++core-y		+= kernel/ mm/ fs/ ipc/ security/ crypto/ block/ embedded/
+ 
+ vmlinux-dirs	:= $(patsubst %/,%,$(filter %/, $(init-y) $(init-m) \
+ 		     $(core-y) $(core-m) $(drivers-y) $(drivers-m) \
+diff --git a/arch/x86/syscalls/syscall_64.tbl b/arch/x86/syscalls/syscall_64.tbl
+index 38ae65d..c171a14 100644
+--- a/arch/x86/syscalls/syscall_64.tbl
++++ b/arch/x86/syscalls/syscall_64.tbl
+@@ -320,6 +320,7 @@
+ 311	64	process_vm_writev	sys_process_vm_writev
+ 312	common	kcmp			sys_kcmp
+ 313	common	finit_module		sys_finit_module
++314	common	copyfd			sys_copyfd
+ 
+ #
+ # x32-specific system call numbers start at 512 to avoid cache impact
+diff --git a/embedded/Makefile b/embedded/Makefile
+new file mode 100644
+index 0000000..03d658f
+--- /dev/null
++++ b/embedded/Makefile
+@@ -0,0 +1,5 @@
++#
++# Makefile for the linux embedded.
++#
++
++obj-y += copyfd.o
+diff --git a/embedded/copyfd.c b/embedded/copyfd.c
+new file mode 100644
+index 0000000..3b48773
+--- /dev/null
++++ b/embedded/copyfd.c
+@@ -0,0 +1,55 @@
++
++#include <linux/pid.h>
++#include <linux/file.h>
++#include <linux/fdtable.h>
++#include <linux/rcupdate.h>
++#include <linux/printk.h>
++#include <linux/kernel.h>
++
++#include <linux/syscalls.h>
++
++SYSCALL_DEFINE2(copyfd, int, pid, int, fd)
++{
++	struct task_struct * task;
++	struct files_struct * files;
++	struct file * file;
++	int error, newfd;
++
++	// TODO - only allow for root user
++	//printk(KERN_ALERT "copyfd: pid=%d, fd=%d", pid, fd);
++
++	error = -ESRCH;
++	task = pid_task(find_vpid(pid), PIDTYPE_PID);
++	if (!task)
++		goto out;
++
++	files = get_files_struct(task);
++
++	rcu_read_lock();
++	file = fcheck_files(files, fd);
++	if (file) {
++		/* File object ref couldn't be taken */
++		if (file->f_mode & FMODE_PATH || !atomic_long_inc_not_zero(&file->f_count))
++			file = NULL;
++	}
++	rcu_read_unlock();
++
++	error = -EBADF;
++	if (!file)
++		goto out;
++
++
++	put_files_struct(files);
++
++	newfd = get_unused_fd();
++	if (newfd < 0) {
++		error = newfd;
++		goto out;
++	}
++
++	fd_install(newfd, file);
++	return newfd;
++
++out:
++	return error;
++}
+diff --git a/include/linux/syscalls.h b/include/linux/syscalls.h
+index 7fac04e..1f84655 100644
+--- a/include/linux/syscalls.h
++++ b/include/linux/syscalls.h
+@@ -847,4 +847,5 @@ asmlinkage long sys_process_vm_writev(pid_t pid,
+ asmlinkage long sys_kcmp(pid_t pid1, pid_t pid2, int type,
+ 			 unsigned long idx1, unsigned long idx2);
+ asmlinkage long sys_finit_module(int fd, const char __user *uargs, int flags);
++asmlinkage long sys_copyfd(int pid, int fd);
+ #endif
+diff --git a/test_copyfd.c b/test_copyfd.c
+new file mode 100644
+index 0000000..ed2b38c
+--- /dev/null
++++ b/test_copyfd.c
+@@ -0,0 +1,22 @@
++#include <stdio.h>
++#include <stdlib.h>
++#include <unistd.h>
++#include <errno.h>
++
++#include <linux/unistd.h>
++
++#define __NR_copyfd 314
++
++
++int main(const int argc, const char ** argv) {
++
++	int pid = atoi(argv[1]);
++
++	int fd = syscall(__NR_copyfd, pid, 1);
++	printf("pid=%d, from_fd=1, to_fd=%d, errno=%d\n", pid, fd, errno);
++
++	ssize_t w = write(fd, "Hello!\n", 7);
++	printf("wrote=%zd\n", w);
++
++	return 0;
++}
+-- 
+1.8.4.2
+
